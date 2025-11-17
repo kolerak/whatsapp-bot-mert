@@ -48,26 +48,45 @@ console.log("  NORMALIZED_MY_PHONE:", MY_PHONE);
 const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
-  // Basit fetch timeout helper'ı
-function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const controller = new AbortController();
-    const id = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`Request timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
+  // Basit fetch timeout helper'ı (çevre uyumluluğu eklenmiş)
+  function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+    return new Promise((resolve, reject) => {
+      const AbortControllerImpl =
+        typeof AbortController !== "undefined" ? AbortController : null;
+      const controller = AbortControllerImpl ? new AbortControllerImpl() : null;
 
-    fetch(url, { ...options, signal: controller.signal })
-      .then((res) => {
-        clearTimeout(id);
-        resolve(res);
-      })
-      .catch((err) => {
-        clearTimeout(id);
-        reject(err);
-      });
-  });
-}
+      const id = setTimeout(() => {
+        if (controller && typeof controller.abort === "function") controller.abort();
+        reject(new Error(`Request timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const doFetch = async () => {
+        let _fetch = typeof fetch !== "undefined" ? fetch : null;
+        if (!_fetch) {
+          try {
+            // Try to require node-fetch dynamically if available
+            // eslint-disable-next-line global-require
+            const nf = require("node-fetch");
+            _fetch = nf;
+          } catch (e) {
+            clearTimeout(id);
+            return reject(new Error("fetch is not available in this environment. Install 'node-fetch' or use a Node version with global fetch."));
+          }
+        }
+
+        try {
+          const res = await _fetch(url, { ...options, signal: controller ? controller.signal : undefined });
+          clearTimeout(id);
+          resolve(res);
+        } catch (err) {
+          clearTimeout(id);
+          reject(err);
+        }
+      };
+
+      doFetch();
+    });
+  }
 
 
 // ===== Runtime State =====
@@ -97,6 +116,33 @@ function addLog(entry) {
     time: new Date().toLocaleTimeString("tr-TR"),
   });
   if (messagesLog.length > 50) messagesLog.shift();
+}
+
+// Güvenli mesaj gönderme helper'ı
+async function safeReply(msg, text) {
+  if (!msg || !text) return;
+  try {
+    if (typeof msg.reply === "function") {
+      await msg.reply(text);
+    } else if (typeof msg.send === "function") {
+      await msg.send(text);
+    } else {
+      console.warn("safeReply: msg nesnesinde reply/send fonksiyonu yok");
+    }
+  } catch (e) {
+    console.error("safeReply hata:", e);
+  }
+}
+
+// Güvenli olarak chat al
+async function safeGetChat(msg) {
+  if (!msg || typeof msg.getChat !== "function") return null;
+  try {
+    return await msg.getChat();
+  } catch (e) {
+    console.error("safeGetChat hata:", e);
+    return null;
+  }
 }
 
 // Bot mesajlarını tanımak için görünmez işaret
@@ -148,69 +194,72 @@ client.on("disconnected", () => {
 
 // ===== TÜM MESAJLARI LOGLAYAN EVENT (GELEN + GİDEN) =====
 client.on("message_create", async (msg) => {
-  const text = (msg.body || "").trim();
+  try {
+    const text = (msg.body || "").trim();
 
-  addLog({
-    direction: msg.fromMe ? "out" : "in",
-    from: msg.from,
-    to: msg.to,
-    body: text,
-  });
+    addLog({
+      direction: msg.fromMe ? "out" : "in",
+      from: msg.from,
+      to: msg.to,
+      body: text,
+    });
 
-  console.log("🧾 [CREATE] =>", {
-    from: msg.from,
-    to: msg.to,
-    fromMe: msg.fromMe,
-    body: text,
-  });
+    console.log("🧾 [CREATE] =>", {
+      from: msg.from,
+      to: msg.to,
+      fromMe: msg.fromMe,
+      body: text,
+    });
 
-  // Senin numaranı otomatik tespit
-  if (!detectedMyPhone && msg.fromMe && msg.from.endsWith("@c.us")) {
-    detectedMyPhone = msg.from;
-    console.log("🆔 SENİN NUMARAN TESPİT EDİLDİ:", detectedMyPhone);
-  }
-
-  // Sevgilinin numarasını otomatik tespit
-  if (
-    !msg.fromMe &&
-    msg.from.endsWith("@c.us") &&
-    (!detectedGF || detectedGF === ALLOWED_CHAT_ID) &&
-    msg.from !== detectedMyPhone
-  ) {
-    detectedGF = msg.from;
-    console.log("💘 SEVGİLİN TESPİT EDİLDİ:", detectedGF);
-  }
-
-  // ----- BURADA: SENİN ATTIGIN MESAJLARA CEVAP -----
-  // Şartlar:
-  // - msg.fromMe === true
-  // - msg.to sevgilinin JID'i
-  // - selfLoverMode AÇIK
-  // - mesaj botun kendi ürettiği mesaj değil (AI_MARK ile işaretli)
-  const gfId = ALLOWED_CHAT_ID || detectedGF;
-  const meId = MY_PHONE || detectedMyPhone;
-
-  if (
-    msg.fromMe &&
-    gfId &&
-    msg.to === gfId &&
-    selfLoverMode &&
-    !text.startsWith(AI_MARK)
-  ) {
-    try {
-      // Burada romantiklik seviyesi: sevgili modu gibi davransın
-      const aiReplyPure = await generateAiReply(text, true);
-      if (!aiReplyPure) return;
-
-      const aiReply = AI_MARK + aiReplyPure; // görünmez işaret ekledik
-
-      const chat = await msg.getChat();
-      await chat.sendMessage(aiReply);
-
-      console.log("📤 [SELF MSG AUTO-REPLY] =>", aiReplyPure);
-    } catch (err) {
-      console.error("❌ SELF AUTO-REPLY HATASI:", err);
+    // Senin numaranı otomatik tespit
+    if (!detectedMyPhone && msg.fromMe && typeof msg.from === "string" && msg.from.endsWith("@c.us")) {
+      detectedMyPhone = msg.from;
+      console.log("🆔 SENİN NUMARAN TESPİT EDİLDİ:", detectedMyPhone);
     }
+
+    // Sevgilinin numarasını otomatik tespit
+    if (
+      !msg.fromMe &&
+      typeof msg.from === "string" &&
+      msg.from.endsWith("@c.us") &&
+      (!detectedGF || detectedGF === ALLOWED_CHAT_ID) &&
+      msg.from !== detectedMyPhone
+    ) {
+      detectedGF = msg.from;
+      console.log("💘 SEVGİLİN TESPİT EDİLDİ:", detectedGF);
+    }
+
+    // ----- BURADA: SENİN ATTIGIN MESAJLARA CEVAP -----
+    const gfId = ALLOWED_CHAT_ID || detectedGF;
+    const meId = MY_PHONE || detectedMyPhone;
+
+    if (
+      msg.fromMe &&
+      gfId &&
+      msg.to === gfId &&
+      selfLoverMode &&
+      !text.startsWith(AI_MARK)
+    ) {
+      try {
+        const aiReplyPure = await generateAiReply(text, true);
+        if (!aiReplyPure) return;
+
+        const aiReply = AI_MARK + aiReplyPure; // görünmez işaret ekledik
+
+        const chat = await safeGetChat(msg);
+        if (chat && typeof chat.sendMessage === "function") {
+          await chat.sendMessage(aiReply);
+        } else {
+          console.warn("CHAT gönderilemedi: chat alınamadı veya sendMessage yok");
+        }
+
+        console.log("📤 [SELF MSG AUTO-REPLY] =>", aiReplyPure);
+      } catch (err) {
+        console.error("❌ SELF AUTO-REPLY HATASI:", err);
+      }
+    }
+  } catch (err) {
+    console.error("message_create genel hata:", err);
   }
 });
 
@@ -281,7 +330,7 @@ console.log("📤 [GÖNDERİLEN CEVAP] =>", aiReplyPure);
   } catch (err) {
     console.error("❌ MESAJ HATASI:", err);
     try {
-      msg.reply("Bir şey oldu ama düzeltiyorum 😅");
+      await safeReply(msg, "Bir şey oldu ama düzeltiyorum 😅");
     } catch {}
   }
 });
@@ -480,7 +529,13 @@ app.get("/toggleSelf", (req, res) => {
 });
 
 // ===== START =====
-client.initialize();
+// ===== START =====
+try {
+  client.initialize();
+} catch (e) {
+  console.error("Client initialize hatası:", e);
+}
+
 // Express error middleware (son route'lardan sonra olmalı)
 app.use((err, req, res, next) => {
   console.error("🌋 Express error:", err);
@@ -488,4 +543,38 @@ app.use((err, req, res, next) => {
   res.status(500).send("Sunucuda beklenmedik bir hata oldu. Birazdan tekrar dene. 🙈");
 });
 
-app.listen(PORT, () => console.log(`🌐 Panel aktif → http://localhost:${PORT}`));
+// Güvenli başlangıç: server referansı tut ve hataları yakala
+let server = null;
+try {
+  server = app.listen(PORT, () => console.log(`🌐 Panel aktif → http://localhost:${PORT}`));
+  server.on('error', (err) => {
+    console.error('Server hata:', err);
+  });
+} catch (e) {
+  console.error('app.listen hatası:', e);
+}
+
+// Graceful shutdown
+async function shutdown(code = 0) {
+  console.log('⚙️ Kapanış başlatılıyor...');
+  try {
+    if (client && typeof client.destroy === 'function') {
+      try {
+        await client.destroy();
+        console.log('Client kapatıldı.');
+      } catch (e) {
+        console.error('Client destroy hatası:', e);
+      }
+    }
+    if (server && typeof server.close === 'function') {
+      server.close(() => console.log('HTTP server kapatıldı.'));
+    }
+  } catch (e) {
+    console.error('Kapanış sırasında hata:', e);
+  } finally {
+    process.exit(code);
+  }
+}
+
+process.on('SIGINT', () => shutdown(0));
+process.on('SIGTERM', () => shutdown(0));
